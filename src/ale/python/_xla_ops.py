@@ -37,6 +37,17 @@ def register_xla_ops(env):
                 ale_py._ale_py.VectorXLAStepGPU(),
                 platform="CUDA",
             )
+        else:
+            cuda_devices = [d for d in jax.devices() if "cuda" in str(d).lower()]
+            if cuda_devices:
+                import warnings
+
+                warnings.warn(
+                    "CUDA devices are visible but ale_py was not compiled with CUDA XLA "
+                    "support. Rebuild with the CUDA toolkit available.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         _xla_registered = True
 

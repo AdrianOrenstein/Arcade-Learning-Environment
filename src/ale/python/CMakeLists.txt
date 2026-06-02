@@ -27,18 +27,10 @@ if (BUILD_VECTOR_LIB AND BUILD_VECTOR_XLA_LIB)
 
     if (CUDAToolkit_FOUND)
         message(STATUS "CUDA Toolkit found: ${CUDAToolkit_VERSION}")
-        enable_language(CUDA)
-        set_source_files_properties(ale_vector_xla_interface.cpp PROPERTIES LANGUAGE CUDA)
         target_sources(_ale_py PRIVATE ale_vector_python_interface.cpp ale_vector_xla_interface.cpp)
         target_include_directories(_ale_py PUBLIC ${XLA_DIR})
-        target_include_directories(_ale_py PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
         target_compile_definitions(_ale_py PRIVATE BUILD_VECTOR_LIB BUILD_VECTOR_XLA_LIB)
-        target_link_libraries(_ale_py PRIVATE CUDA::cudart)
-
-        set_target_properties(_ale_py PROPERTIES
-            POSITION_INDEPENDENT_CODE ON
-            CUDA_SEPARABLE_COMPILATION OFF
-        )
+        target_link_libraries(_ale_py PRIVATE ${CMAKE_DL_LIBS})
     else()
         message(WARNING "CUDA Toolkit not found - disabling XLA support. Install CUDA Toolkit to enable XLA.")
         target_sources(_ale_py PRIVATE ale_vector_python_interface.cpp)

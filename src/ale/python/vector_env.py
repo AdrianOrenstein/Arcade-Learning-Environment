@@ -247,6 +247,19 @@ class AtariVectorEnv(VectorEnv):
         # The data will be of the batch_size, see `info["env_id"]` for the set of environments used.
         return self.ale.recv()
 
+    def close(self, **kwargs):
+        """Close the environment and release all resources."""
+        if hasattr(self, "_torch_unregister"):
+            self._torch_unregister()
+            del self._torch_unregister
+        super().close(**kwargs)
+
+    def __del__(self):
+        """Release resources on garbage collection."""
+        if hasattr(self, "_torch_unregister"):
+            self._torch_unregister()
+            del self._torch_unregister
+
     def torch(self):
         """Register and return PyTorch custom ops for zero-copy ALE integration.
 
@@ -259,7 +272,15 @@ class AtariVectorEnv(VectorEnv):
             raise gymnasium.error.DependencyNotInstalled(
                 "ALE requires PyTorch for torch() support. Install with: pip install torch"
             ) from e
-        return register_pytorch_ops(self)
+        (
+            handle_id,
+            ale_send,
+            ale_step,
+            ale_recv,
+            unregister,
+        ) = register_pytorch_ops(self)
+        self._torch_unregister = unregister
+        return handle_id, ale_send, ale_step, ale_recv
 
     def xla(self):
         """Return XLA-compatible functions for JAX integration.

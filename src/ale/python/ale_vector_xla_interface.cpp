@@ -1,3 +1,12 @@
+// Forward-declare cudaStream_t so ffi::PlatformStream<cudaStream_t> compiles
+// without cuda_runtime.h. The actual CUDA symbols are loaded lazily via dlsym
+// the first time a GPU callback fires, by which point JAX has already loaded
+// its own libcudart into the process.
+#ifdef BUILD_VECTOR_XLA_LIB
+struct CUstream_st;
+typedef struct CUstream_st* cudaStream_t;
+#endif
+
 #include "xla/ffi/api/ffi.h"
 
 #include "ale/vector/env_vectorizer.hpp"
@@ -9,9 +18,90 @@
 #include <cstring>  // For memcpy
 #include <iostream>
 
-#ifdef __CUDACC__
-#include <cuda_runtime.h>
+#ifdef BUILD_VECTOR_XLA_LIB
+#ifndef _WIN32
+#include <dlfcn.h>
+#else
+#include <windows.h>
 #endif
+
+// Minimal CUDA type aliases matching the stable CUDA ABI
+typedef int cudaError_t;
+typedef int cudaMemcpyKind;
+static const cudaError_t       cudaSuccess            = 0;
+static const cudaMemcpyKind    cudaMemcpyHostToDevice = 1;
+static const cudaMemcpyKind    cudaMemcpyDeviceToHost = 2;
+
+typedef cudaError_t  (*fn_cudaMemcpyAsync_t)(void*, const void*, size_t, cudaMemcpyKind, cudaStream_t);
+typedef cudaError_t  (*fn_cudaStreamSynchronize_t)(cudaStream_t);
+typedef const char*  (*fn_cudaGetErrorString_t)(cudaError_t);
+typedef cudaError_t  (*fn_cudaGetLastError_t)();
+
+namespace {
+
+fn_cudaMemcpyAsync_t       p_cudaMemcpyAsync       = nullptr;
+fn_cudaStreamSynchronize_t p_cudaStreamSynchronize = nullptr;
+fn_cudaGetErrorString_t    p_cudaGetErrorString    = nullptr;
+fn_cudaGetLastError_t      p_cudaGetLastError      = nullptr;
+
+bool cuda_fns_initialized = false;
+bool cuda_fns_available   = false;
+
+bool init_cuda_fns() {
+#ifdef _WIN32
+    HMODULE h = GetModuleHandleA("cudart64_12.dll");
+    if (!h) h = GetModuleHandleA("cudart64_11.dll");
+    if (!h) return false;
+    auto sym = [&](const char* n) { return (void*)GetProcAddress(h, n); };
+#else
+    // JAX loads its bundled libcudart with RTLD_LOCAL, so RTLD_DEFAULT won't
+    // find it.  RTLD_NOLOAD returns a handle to the already-mapped library
+    // without loading a second copy; we then look up symbols from that handle.
+    void* h = dlopen("libcudart.so.12", RTLD_LAZY | RTLD_NOLOAD);
+    if (!h) h = dlopen("libcudart.so", RTLD_LAZY | RTLD_NOLOAD);
+    if (!h) {
+        // Fall back: not yet loaded, bring it in ourselves.
+        h = dlopen("libcudart.so.12", RTLD_LAZY | RTLD_GLOBAL);
+    }
+    if (!h) return false;
+    auto sym = [&](const char* n) { return dlsym(h, n); };
+#endif
+    p_cudaMemcpyAsync       = (fn_cudaMemcpyAsync_t)      sym("cudaMemcpyAsync");
+    p_cudaStreamSynchronize = (fn_cudaStreamSynchronize_t) sym("cudaStreamSynchronize");
+    p_cudaGetErrorString    = (fn_cudaGetErrorString_t)    sym("cudaGetErrorString");
+    p_cudaGetLastError      = (fn_cudaGetLastError_t)      sym("cudaGetLastError");
+    return p_cudaMemcpyAsync && p_cudaStreamSynchronize
+        && p_cudaGetErrorString && p_cudaGetLastError;
+}
+
+}  // namespace
+
+// Inline helpers so call sites look identical to the real CUDA API.
+static inline cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t n,
+                                          cudaMemcpyKind kind, cudaStream_t s) {
+    return p_cudaMemcpyAsync(dst, src, n, kind, s);
+}
+static inline cudaError_t cudaStreamSynchronize(cudaStream_t s) {
+    return p_cudaStreamSynchronize(s);
+}
+static inline const char* cudaGetErrorString(cudaError_t e) {
+    return p_cudaGetErrorString(e);
+}
+static inline cudaError_t cudaGetLastError() {
+    return p_cudaGetLastError();
+}
+
+#define CUDA_LAZY_INIT() \
+    do { \
+        if (!cuda_fns_initialized) { \
+            cuda_fns_available   = init_cuda_fns(); \
+            cuda_fns_initialized = true; \
+        } \
+        if (!cuda_fns_available) \
+            return ffi::Error::Internal("CUDA runtime symbols not found; is libcudart loaded?"); \
+    } while (0)
+
+#endif  // BUILD_VECTOR_XLA_LIB
 
 namespace ffi = xla::ffi;
 namespace nb = nanobind;
@@ -108,7 +198,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::S32>>()  // episode_frame_numbers
 );
 
-#ifdef __CUDACC__
+#ifdef BUILD_VECTOR_XLA_LIB
 // GPU version of XLAReset with CUDA stream support
 ffi::Error XLAResetGPUImpl(
     cudaStream_t stream,
@@ -122,6 +212,7 @@ ffi::Error XLAResetGPUImpl(
     ffi::ResultBuffer<ffi::S32> frame_numbers_buffer,
     ffi::ResultBuffer<ffi::S32> episode_frame_numbers_buffer
 ) {
+    CUDA_LAZY_INIT();
     // Validate handle buffer size
     if (handle_buffer.element_count() != sizeof(ale::vector::EnvVectorizer*)) {
         return ffi::Error::Internal("Incorrect handle buffer size in reset (GPU)");
@@ -270,7 +361,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::S32>>()  // frame_numbers
         .Ret<ffi::Buffer<ffi::S32>>()  // episode_frame_numbers
 );
-#endif  // __CUDACC__
+#endif  // BUILD_VECTOR_XLA_LIB
 
 // CPU version of XLAStep
 ffi::Error XLAStepImpl(
@@ -394,7 +485,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::S32>>()   // episode_frame_numbers
 );
 
-#ifdef __CUDACC__
+#ifdef BUILD_VECTOR_XLA_LIB
 // GPU version of XLAStep with CUDA stream support
 ffi::Error XLAStepGPUImpl(
     cudaStream_t stream,
@@ -411,6 +502,7 @@ ffi::Error XLAStepGPUImpl(
     ffi::ResultBuffer<ffi::S32> frame_numbers_buffer,
     ffi::ResultBuffer<ffi::S32> episode_frame_numbers_buffer
 ) {
+    CUDA_LAZY_INIT();
     // Validate handle buffer size
     if (handle_buffer.element_count() != sizeof(ale::vector::EnvVectorizer*)) {
         return ffi::Error::Internal("Incorrect handle buffer size in step (GPU)");
@@ -610,7 +702,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ret<ffi::Buffer<ffi::S32>>()   // frame_numbers
         .Ret<ffi::Buffer<ffi::S32>>()   // episode_frame_numbers
 );
-#endif  // __CUDACC__
+#endif  // BUILD_VECTOR_XLA_LIB
 
 template <typename T>
 nb::capsule EncapsulateFFICall(T *fn) {
@@ -625,7 +717,7 @@ void init_vector_module_xla(nb::module_& m) {
     m.def("VectorXLAReset", [] {return EncapsulateFFICall(AtariVectorEnvXLAReset); });
     m.def("VectorXLAStep", [] {return EncapsulateFFICall(AtariVectorEnvXLAStep); });
 
-#ifdef __CUDACC__
+#ifdef BUILD_VECTOR_XLA_LIB
     // GPU handlers
     m.def("VectorXLAResetGPU", [] {return EncapsulateFFICall(AtariVectorEnvXLAResetGPU); });
     m.def("VectorXLAStepGPU", [] {return EncapsulateFFICall(AtariVectorEnvXLAStepGPU); });

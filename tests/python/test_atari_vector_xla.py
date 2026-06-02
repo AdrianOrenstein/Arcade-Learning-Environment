@@ -1,3 +1,4 @@
+import ale_py
 import numpy as np
 import pytest
 from ale_py import AtariVectorEnv
@@ -44,6 +45,16 @@ def assert_rollout_equivalence(
 
     envs_1.close()
     envs_2.close()
+
+
+def test_cuda_handlers_compiled_when_cuda_visible():
+    cuda_devices = [d for d in jax.devices() if "cuda" in str(d).lower()]
+    if not cuda_devices:
+        pytest.skip("No CUDA devices visible")
+    assert hasattr(ale_py._ale_py, "VectorXLAResetGPU"), (
+        "CUDA devices visible but CUDA XLA handlers not compiled in — "
+        "rebuild with enable_language(CUDA) and LANGUAGE CUDA on ale_vector_xla_interface.cpp"
+    )
 
 
 @pytest.mark.parametrize(

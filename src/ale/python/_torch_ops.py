@@ -1,8 +1,5 @@
 """PyTorch custom ops for ALE - registered via AtariVectorEnv.torch().
 
-No 'from __future__ import annotations' here so torch.library.custom_op can
-infer op schemas from type annotations without PEP 563 string-ification.
-
 Do not import this module at the top level; it is lazy-loaded by torch().
 """
 
