@@ -53,7 +53,7 @@ def test_cuda_handlers_compiled_when_cuda_visible():
         pytest.skip("No CUDA devices visible")
     assert hasattr(ale_py._ale_py, "VectorXLAResetGPU"), (
         "CUDA devices visible but CUDA XLA handlers not compiled in — "
-        "rebuild with enable_language(CUDA) and LANGUAGE CUDA on ale_vector_xla_interface.cpp"
+        "ensure CUDA Toolkit is installed and rebuild with BUILD_VECTOR_XLA_LIB=ON"
     )
 
 
