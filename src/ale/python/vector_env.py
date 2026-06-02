@@ -260,27 +260,36 @@ class AtariVectorEnv(VectorEnv):
             self._torch_unregister()
             del self._torch_unregister
 
-    def torch(self):
-        """Register and return PyTorch custom ops for zero-copy ALE integration.
+    def torch(self, device=None, tensordict: bool = False):
+        """Patch step/send/recv to use PyTorch tensors for zero-copy ALE integration.
+
+        Args:
+            device: Target device for returned tensors (e.g. "cuda"). When set,
+                H2D transfers use non_blocking pinned-memory copies.
+            tensordict: If True, step and recv return a TensorDict instead of a
+                flat tuple. Requires the tensordict package.
 
         Returns:
-            (handle_id, ale_send, ale_step, ale_recv, unregister)
+            self — for chaining: env = AtariVectorEnv(...).torch(device="cuda")
         """
+        assert not self.continuous, (
+            ".torch() only supports discrete action spaces; "
+            "continuous action spaces are not yet implemented"
+        )
         try:
             from ._torch_ops import register_pytorch_ops
         except ImportError as e:
             raise gymnasium.error.DependencyNotInstalled(
                 "ALE requires PyTorch for torch() support. Install with: pip install torch"
             ) from e
-        (
-            handle_id,
-            ale_send,
-            ale_step,
-            ale_recv,
-            unregister,
-        ) = register_pytorch_ops(self)
+        step, send, recv, unregister = register_pytorch_ops(
+            self, device=device, tensordict=tensordict
+        )
+        self.step = step
+        self.send = send
+        self.recv = recv
         self._torch_unregister = unregister
-        return handle_id, ale_send, ale_step, ale_recv
+        return self
 
     def xla(self):
         """Return XLA-compatible functions for JAX integration.
