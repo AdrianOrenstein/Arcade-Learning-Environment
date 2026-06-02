@@ -43,12 +43,17 @@ def register_pytorch_ops(env, device=None, tensordict: bool = False):
     _torch_buffers[handle_id] = {
         "device": device,
         "vector_interface": env.ale,
+        "continuous": env.continuous,
+        "continuous_action_threshold": env.continuous_action_threshold,
+        "map_action_idx": (
+            torch.from_numpy(env.map_action_idx) if env.continuous else None
+        ),
         "actions": torch.empty(num_envs, dtype=torch.int32, pin_memory=True),
+        "paddle_strength": np.ones(num_envs, dtype=np.float32),
         "obs": torch.empty(obs_shape, dtype=torch.uint8, pin_memory=True),
         "reward": torch.empty(num_envs, dtype=torch.int32, pin_memory=True),
         "term": torch.empty(num_envs, dtype=torch.bool, pin_memory=True),
         "trunc": torch.empty(num_envs, dtype=torch.bool, pin_memory=True),
-        "paddle_strength": np.ones(num_envs, dtype=np.float32),
         "h2d_event": torch.cuda.Event() if torch.cuda.is_available() else None,
         **{
             k: torch.empty(num_envs, dtype=torch.int32, pin_memory=True)
@@ -62,7 +67,20 @@ def register_pytorch_ops(env, device=None, tensordict: bool = False):
         @torch.library.custom_op("ale::send", mutates_args=())
         def ale_send(handle_id: int, actions: torch.Tensor) -> torch.Tensor:
             buf = _torch_buffers[handle_id]
-            buf["actions"].copy_(actions)
+            if buf["continuous"]:
+                x = actions[:, 0] * torch.cos(actions[:, 1])
+                y = actions[:, 0] * torch.sin(actions[:, 1])
+                t = buf["continuous_action_threshold"]
+                horizontal = -(x < -t).int() + (x > t).int() + 1
+                vertical = -(y < -t).int() + (y > t).int() + 1
+                fire = (actions[:, 2] > t).int()
+                buf["actions"].copy_(buf["map_action_idx"][horizontal, vertical, fire])
+                paddle = actions[:, 0]
+                if paddle.is_cuda:
+                    paddle = paddle.cpu()
+                buf["paddle_strength"][:] = paddle.numpy()
+            else:
+                buf["actions"].copy_(actions)
             buf["vector_interface"].send(buf["actions"].numpy(), buf["paddle_strength"])
             return actions.new_empty(())
 

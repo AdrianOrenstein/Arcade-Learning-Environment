@@ -272,10 +272,6 @@ class AtariVectorEnv(VectorEnv):
         Returns:
             self — for chaining: env = AtariVectorEnv(...).torch(device="cuda")
         """
-        assert not self.continuous, (
-            ".torch() only supports discrete action spaces; "
-            "continuous action spaces are not yet implemented"
-        )
         try:
             from ._torch_ops import register_pytorch_ops
         except ImportError as e:
