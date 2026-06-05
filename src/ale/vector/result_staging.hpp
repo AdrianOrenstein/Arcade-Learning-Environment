@@ -83,6 +83,14 @@ public:
         while (!batch_ready_.wait()) {}
     }
 
+    /// Wake a thread blocked in wait_for_batch() without a full batch.
+    /// Used when a worker throws before staging its result: recv() would
+    /// otherwise wait forever for a slot that never fills. After being woken
+    /// recv() rethrows the worker's exception via check_error().
+    void signal_abort() {
+        batch_ready_.signal(1);
+    }
+
     /// Release current batch and prepare for next.
     /// Returns the completed batch (transfers ownership).
     /// Releases slot permits for blocked workers.

@@ -41,6 +41,56 @@ elseif (BUILD_VECTOR_LIB)
     target_compile_definitions(_ale_py PRIVATE BUILD_VECTOR_LIB)
 endif()
 
+# PyTorch C++ backend for the vector env (opt-in: -DBUILD_VECTOR_TORCH_LIB=ON).
+# Compiled into _ale_py so it shares the single EnvVectorizer instance; the
+# libtorch dependency therefore only exists in these opt-in builds, not in the
+# standard wheels. We query libtorch's headers/libs from the Python install
+# rather than find_package(Torch), whose Caffe2 CUDA cmake rejects a system CUDA
+# toolkit that mismatches torch's bundled one (we don't compile CUDA kernels:
+# cudart is loaded via dlsym and only c10's stream API is linked).
+if (BUILD_VECTOR_LIB AND BUILD_VECTOR_TORCH_LIB)
+    execute_process(COMMAND "${Python_EXECUTABLE}" "-c"
+        "import torch.utils.cpp_extension as c; print(';'.join(c.include_paths()))"
+        OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE TORCH_INCLUDE_DIRS)
+    execute_process(COMMAND "${Python_EXECUTABLE}" "-c"
+        "import os, torch; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"
+        OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE TORCH_LIB_DIR)
+    execute_process(COMMAND "${Python_EXECUTABLE}" "-c"
+        "import torch; print(1 if torch.version.cuda else 0)"
+        OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE TORCH_HAS_CUDA)
+    execute_process(COMMAND "${Python_EXECUTABLE}" "-c"
+        "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))"
+        OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE TORCH_ABI)
+
+    target_sources(_ale_py PRIVATE ale_vector_torch_interface.cpp)
+    target_compile_definitions(_ale_py PRIVATE
+        BUILD_VECTOR_TORCH_LIB _GLIBCXX_USE_CXX11_ABI=${TORCH_ABI})
+    target_include_directories(_ale_py PRIVATE ${TORCH_INCLUDE_DIRS})
+    target_link_directories(_ale_py PRIVATE ${TORCH_LIB_DIR})
+    target_link_libraries(_ale_py PRIVATE torch torch_cpu c10)
+
+    # Enable the CUDA send/recv path when torch was built against CUDA.
+    if (TORCH_HAS_CUDA STREQUAL "1")
+        message(STATUS "PyTorch CUDA backend enabled for vector env")
+        target_compile_definitions(_ale_py PRIVATE BUILD_VECTOR_TORCH_CUDA)
+        target_link_libraries(_ale_py PRIVATE c10_cuda torch_cuda)
+        # CUDA headers for <cuda_runtime_api.h> (from the nvidia pip wheel that
+        # matches torch's CUDA version; fall back to a system CUDA toolkit).
+        execute_process(COMMAND "${Python_EXECUTABLE}" "-c"
+            "import os, nvidia.cuda_runtime as m; print(os.path.join(os.path.dirname(m.__file__), 'include'))"
+            OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE NVIDIA_CUDA_INCLUDE
+            ERROR_QUIET)
+        if (NVIDIA_CUDA_INCLUDE AND IS_DIRECTORY "${NVIDIA_CUDA_INCLUDE}")
+            target_include_directories(_ale_py PRIVATE ${NVIDIA_CUDA_INCLUDE})
+        else()
+            find_package(CUDAToolkit QUIET)
+            if (CUDAToolkit_FOUND)
+                target_include_directories(_ale_py PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+            endif()
+        endif()
+    endif()
+endif()
+
 target_link_libraries(_ale_py PUBLIC ale ale-lib)
 
 # Install the compiled module
@@ -54,6 +104,7 @@ install(FILES
     vector_env.py
     _xla_ops.py
     _torch_ops.py
+    _torchrl_env.py
     py.typed
     DESTINATION ale_py)
 
@@ -92,4 +143,12 @@ if (SDL_SUPPORT AND SDL_DYNLOAD)
             $<TARGET_FILE_DIR:_ale_py>)
     # Install SDL2 library alongside the module
     install(FILES $<TARGET_FILE:SDL2::SDL2> DESTINATION ale_py)
+endif()
+
+# Resolve libtorch at load time so `import ale_py` works without `import torch`
+# first. Appended last so it survives the SDL block's INSTALL_RPATH assignment.
+# ale_py/ -> ../torch/lib in site-packages; absolute build dir for in-tree runs.
+if (BUILD_VECTOR_LIB AND BUILD_VECTOR_TORCH_LIB)
+    set_property(TARGET _ale_py APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../torch/lib")
+    set_property(TARGET _ale_py APPEND PROPERTY BUILD_RPATH "${TORCH_LIB_DIR}")
 endif()

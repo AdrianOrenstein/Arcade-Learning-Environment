@@ -162,6 +162,18 @@ void EnvVectorizer::send(const std::vector<Action>& actions) {
         mapped.env_id = actual_env_id;
         mapped.force_reset = false;
 
+        // Validate the action index on the calling thread. If left to the worker
+        // thread, an out-of-range action throws after dequeue but before the
+        // result is staged, so recv() would block forever waiting for a batch
+        // slot that never fills. Failing here surfaces a clear error instead.
+        const int n_actions = static_cast<int>(envs_[actual_env_id]->action_set().size());
+        if (mapped.action_id < 0 || mapped.action_id >= n_actions) {
+            throw std::out_of_range(
+                "Invalid action_id " + std::to_string(mapped.action_id) +
+                " for environment " + std::to_string(actual_env_id) +
+                "; expected 0 <= action_id < " + std::to_string(n_actions));
+        }
+
         // Set action on environment
         envs_[actual_env_id]->set_action(mapped.action_id, mapped.paddle_strength);
 
@@ -203,6 +215,9 @@ void EnvVectorizer::worker_loop(int thread_id) {
 
         } catch (...) {
             set_error(std::current_exception());
+            // The result for this env was not staged, so the batch can never
+            // fill. Wake recv() so it rethrows the error instead of hanging.
+            staging_->signal_abort();
         }
     }
 }

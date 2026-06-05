@@ -51,7 +51,9 @@ def register_xla_ops(env):
 
         _xla_registered = True
 
-    map_action_idx_jnp = jnp.array(env.map_action_idx)
+    # Only continuous envs have map_action_idx (and only the continuous step
+    # branch below uses it).
+    map_action_idx_jnp = jnp.array(env.map_action_idx) if env.continuous else None
 
     def xla_reset(
         handle: np.ndarray,

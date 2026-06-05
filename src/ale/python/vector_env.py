@@ -260,7 +260,7 @@ class AtariVectorEnv(VectorEnv):
             self._torch_unregister()
             del self._torch_unregister
 
-    def torch(self, device=None, tensordict: bool = False):
+    def torch(self, device=None, tensordict: bool = False, cpp: bool = False):
         """Patch step/send/recv to use PyTorch tensors for zero-copy ALE integration.
 
         Args:
@@ -268,6 +268,9 @@ class AtariVectorEnv(VectorEnv):
                 H2D transfers use non_blocking pinned-memory copies.
             tensordict: If True, step and recv return a TensorDict instead of a
                 flat tuple. Requires the tensordict package.
+            cpp: If True, use the C++ ale_cpp::send/recv ops instead of the
+                Python ops. Requires ale_py built with -DBUILD_VECTOR_TORCH_LIB=ON.
+                Useful for benchmarking the two backends against each other.
 
         Returns:
             self — for chaining: env = AtariVectorEnv(...).torch(device="cuda")
@@ -278,14 +281,36 @@ class AtariVectorEnv(VectorEnv):
             raise gymnasium.error.DependencyNotInstalled(
                 "ALE requires PyTorch for torch() support. Install with: pip install torch"
             ) from e
-        step, send, recv, unregister = register_pytorch_ops(
-            self, device=device, tensordict=tensordict
+        step, send, recv, reset, unregister = register_pytorch_ops(
+            self, device=device, tensordict=tensordict, cpp=cpp
         )
         self.step = step
         self.send = send
         self.recv = recv
+        self.reset = reset
         self._torch_unregister = unregister
         return self
+
+    def torchrl(self, device=None):
+        """Wrap this env as a ``torchrl.envs.EnvBase`` for TorchRL integration.
+
+        Patches step/send/recv to use PyTorch tensors (see :meth:`torch`) and
+        returns a TorchRL environment exposing the matching observation, action,
+        reward and done specs, ready for collectors and trainers.
+
+        Args:
+            device: Target device for returned tensors (e.g. "cuda").
+
+        Returns:
+            An ``AtariTorchRLEnv`` wrapping this environment.
+        """
+        try:
+            from ._torchrl_env import AtariTorchRLEnv
+        except ImportError as e:
+            raise gymnasium.error.DependencyNotInstalled(
+                'ALE is missing torchrl, necessary for TorchRL support, use `pip install "ale_py[torch]"` to import'
+            ) from e
+        return AtariTorchRLEnv(self, device=device)
 
     def xla(self):
         """Return XLA-compatible functions for JAX integration.

@@ -39,6 +39,7 @@
 namespace nb = nanobind;
 void init_vector_module(nb::module_ &m);
 void init_vector_module_xla(nb::module_ &m);
+void init_vector_module_torch(nb::module_ &m);
 
 using namespace nb::literals;
 
@@ -238,6 +239,9 @@ NB_MODULE(_ale_py, m) {
 
     #ifdef BUILD_VECTOR_XLA_LIB
         init_vector_module_xla(m);
+    #endif
+    #ifdef BUILD_VECTOR_TORCH_LIB
+        init_vector_module_torch(m);
     #endif
 #endif
 }

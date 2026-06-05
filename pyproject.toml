@@ -53,12 +53,22 @@ xla = [
     "jax >= 0.4.31; sys_platform == 'win32' or sys_platform == 'linux'",
     "chex; sys_platform == 'win32' or sys_platform == 'linux'",
 ]
+torch = [
+    "gymnasium>=1.1.0",
+    "opencv-python>=3.0",
+    "torch",
+    "tensordict",
+    "torchrl",
+]
 test = [
     "pytest>=7.0",
     "gymnasium>=1.1.0",
     "opencv-python>=3.0",
     "jax >= 0.4.31; sys_platform == 'win32' or sys_platform == 'linux'",
-    "chex; sys_platform == 'win32' or sys_platform == 'linux'"
+    "chex; sys_platform == 'win32' or sys_platform == 'linux'",
+    "torch",
+    "tensordict",
+    "torchrl"
 ]
 
 [project.urls]

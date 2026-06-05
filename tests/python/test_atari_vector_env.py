@@ -766,3 +766,27 @@ class TestMultiRomVectorEnv:
         masked_actions = actions[env_ids]
         env.send(masked_actions)
         obs, rewards, terminations, truncations, info = env.recv()
+
+
+def test_out_of_range_action_raises():
+    """An out-of-range action raises instead of deadlocking recv().
+
+    Regression test: the worker thread used to throw std::out_of_range after
+    dequeueing the action but before staging its result, so recv() waited
+    forever for a batch slot that never filled. The action index is now
+    validated in send() on the calling thread.
+    """
+    from ale_py.vector_env import AtariVectorEnv
+
+    env = AtariVectorEnv(game="pong", num_envs=2)
+    env.reset(seed=0)
+    n_actions = int(env.action_space.nvec[0])
+
+    # In range: steps fine.
+    env.step(np.zeros(2, dtype=np.int64))
+
+    # Out of range: clear error rather than a hang.
+    with pytest.raises(IndexError):
+        env.step(np.full(2, n_actions, dtype=np.int64))
+
+    env.close()
