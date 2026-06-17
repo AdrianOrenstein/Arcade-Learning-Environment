@@ -105,28 +105,27 @@ def register_pytorch_ops(env, device=None, tensordict: bool = False, cpp: bool =
     targets_cuda = device is not None and torch.device(device).type == "cuda"
 
     setup = _setup_cpp if cpp else _setup_python
-    send_op, recv_op, all_keys, unregister = setup(
+    step_op, send_op, recv_op, recv_keys, unregister = setup(
         env, device, handle_id, num_envs, obs_shape, targets_cuda
     )
+    step_keys = _ALL_KEYS + ("final_obs",)
 
     if tensordict:
 
         def step(actions: torch.Tensor):
-            send_op(handle_id, actions)
             return _TensorDict(
-                dict(zip(all_keys, recv_op(handle_id))), batch_size=[num_envs]
+                dict(zip(step_keys, step_op(handle_id, actions))), batch_size=[num_envs]
             )
 
         def recv():
             return _TensorDict(
-                dict(zip(all_keys, recv_op(handle_id))), batch_size=[num_envs]
+                dict(zip(recv_keys, recv_op(handle_id))), batch_size=[num_envs]
             )
 
     else:
 
         def step(actions: torch.Tensor):
-            send_op(handle_id, actions)
-            return recv_op(handle_id)
+            return step_op(handle_id, actions)
 
         def recv():
             return recv_op(handle_id)
@@ -231,8 +230,25 @@ def _setup_cpp(env, device, handle_id, num_envs, obs_shape, targets_cuda):
         def _(handle_id: int):
             return _recv_fake(handle_id, final=True)
 
-        # Order send before recv under torch.compile (the ops have side effects
-        # the schema can't express). Handles are kept alive in _effect_handles.
+        # Atomic step op: takes actions as explicit input so data dependency
+        # handles send-before-recv ordering - no EffectType.ORDERED needed.
+        # AOTAutograd sees a single leaf op and calls the fake at trace time.
+        _Recv9 = tuple[
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+        ]
+
+        @torch.library.custom_op("ale_cpp::step", mutates_args=())
+        def ale_cpp_step(handle_id: int, actions: torch.Tensor) -> _Recv9:
+            torch.ops.ale_cpp.send(handle_id, actions)
+            return torch.ops.ale_cpp.recv_same_step(handle_id)
+
+        @ale_cpp_step.register_fake
+        def _(handle_id: int, actions: torch.Tensor) -> _Recv9:
+            return _recv_fake(handle_id, final=True)
+
+        # Order send/recv for async use (EffectType.ORDERED required since they
+        # have no tensor data dependency between them).
         from torch._higher_order_ops.effects import _register_effectful_op
 
         for _name in ("ale_cpp::send", "ale_cpp::recv", "ale_cpp::recv_same_step"):
@@ -254,14 +270,9 @@ def _setup_cpp(env, device, handle_id, num_envs, obs_shape, targets_cuda):
         _ale_cpp.torch_unregister_handle(handle_id)
         _torch_buffers.pop(handle_id, None)
 
-    if _is_same_step(env):
-        return (
-            torch.ops.ale_cpp.send,
-            torch.ops.ale_cpp.recv_same_step,
-            _ALL_KEYS + ("final_obs",),
-            unregister,
-        )
-    return torch.ops.ale_cpp.send, torch.ops.ale_cpp.recv, _ALL_KEYS, unregister
+    recv_op = torch.ops.ale_cpp.recv_same_step if _is_same_step(env) else torch.ops.ale_cpp.recv
+    recv_keys = _ALL_KEYS + ("final_obs",) if _is_same_step(env) else _ALL_KEYS
+    return torch.ops.ale_cpp.step, torch.ops.ale_cpp.send, recv_op, recv_keys, unregister
 
 
 def _setup_python(env, device, handle_id, num_envs, obs_shape, targets_cuda):
@@ -291,12 +302,7 @@ def _setup_python(env, device, handle_id, num_envs, obs_shape, targets_cuda):
             k: torch.empty(num_envs, dtype=torch.int32, pin_memory=True)
             for k in _INFO_KEYS
         },
-        # SameStep mode returns the pre-reset observation for done envs.
-        **(
-            {"final_obs": torch.empty(obs_shape, dtype=torch.uint8, pin_memory=True)}
-            if same_step
-            else {}
-        ),
+        "final_obs": torch.empty(obs_shape, dtype=torch.uint8, pin_memory=True),
     }
 
     if not _torch_registered:
@@ -366,14 +372,20 @@ def _setup_python(env, device, handle_id, num_envs, obs_shape, targets_cuda):
             lambda handle_id: _python_recv_fake(handle_id, True)
         )
 
+        # Atomic step op: actions is explicit input so data dependency handles
+        # ordering without EffectType.ORDERED.
+        @torch.library.custom_op("ale::step", mutates_args=())
+        def ale_step(handle_id: int, actions: torch.Tensor) -> _Recv9:
+            torch.ops.ale.send(handle_id, actions)
+            return _python_recv_impl(handle_id, with_final=True)
+
+        @ale_step.register_fake
+        def _(handle_id: int, actions: torch.Tensor) -> _Recv9:
+            return _python_recv_fake(handle_id, with_final=True)
+
     def unregister() -> None:
         _torch_buffers.pop(handle_id, None)
 
-    if same_step:
-        return (
-            torch.ops.ale.send,
-            torch.ops.ale.recv_same_step,
-            _ALL_KEYS + ("final_obs",),
-            unregister,
-        )
-    return torch.ops.ale.send, torch.ops.ale.recv, _ALL_KEYS, unregister
+    recv_op = torch.ops.ale.recv_same_step if same_step else torch.ops.ale.recv
+    recv_keys = _ALL_KEYS + ("final_obs",) if same_step else _ALL_KEYS
+    return torch.ops.ale.step, torch.ops.ale.send, recv_op, recv_keys, unregister
