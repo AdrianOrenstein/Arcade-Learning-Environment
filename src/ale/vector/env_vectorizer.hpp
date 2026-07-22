@@ -40,7 +40,8 @@ public:
         bool reward_clipping = true,
         int max_episode_steps = 108000,
         float repeat_action_probability = 0.0f,
-        bool full_action_space = false
+        bool full_action_space = false,
+        bool allow_pending_action = false
     );
 
     ~EnvVectorizer();
@@ -72,6 +73,7 @@ public:
     const std::vector<ActionVect>& action_sets() const { return action_sets_; }
     AutoresetMode autoreset_mode() const { return autoreset_mode_; }
     bool is_grayscale() const { return grayscale_; }
+    bool allow_pending_action() const { return allow_pending_action_; }
 
     /// Get observation shape as tuple (stack_num, height, width) or (stack_num, height, width, 3)
     std::tuple<int, int, int, int> observation_shape() const {
@@ -94,6 +96,7 @@ private:
     bool grayscale_;
     std::size_t stacked_obs_size_;
     AutoresetMode autoreset_mode_;
+    bool allow_pending_action_;
 
     // Environments
     std::vector<std::unique_ptr<PreprocessedEnv>> envs_;

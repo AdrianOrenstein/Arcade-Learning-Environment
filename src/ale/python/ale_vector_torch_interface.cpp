@@ -95,7 +95,9 @@ inline void continuous_to_action(const TorchHandle& d, const float* a3,
 }
 
 /// Build the Action batch from the raw action buffer (int32 ids for discrete,
-/// float (batch,3) for continuous) and dispatch it to the vectorizer.
+/// float (batch,3) for continuous) and dispatch it to the vectorizer. With
+/// allow_pending_action the extra last id is the pending action; the
+/// vectorizer detects it and holds the env.
 void build_and_send(const TorchHandle& d, const void* raw) {
     std::vector<Action> actions(static_cast<std::size_t>(d.batch_size));
     if (d.continuous) {
@@ -152,7 +154,7 @@ std::vector<at::Tensor> recv_cpu(TorchHandle& d, bool with_final) {
     auto i32 = at::TensorOptions().dtype(at::kInt);
     auto obs_shape = obs_shape_for(d.vectorizer, batch);
     at::Tensor obs = at::empty(obs_shape, at::TensorOptions().dtype(at::kByte));
-    at::Tensor reward = at::empty({batch}, i32);
+    at::Tensor reward = at::empty({batch}, at::TensorOptions().dtype(at::kFloat));
     at::Tensor term = at::empty({batch}, at::TensorOptions().dtype(at::kBool));
     at::Tensor trunc = at::empty({batch}, at::TensorOptions().dtype(at::kBool));
     at::Tensor env_id = at::empty({batch}, i32);
@@ -161,7 +163,7 @@ std::vector<at::Tensor> recv_cpu(TorchHandle& d, bool with_final) {
     at::Tensor ep_frame = at::empty({batch}, i32);
 
     std::memcpy(obs.data_ptr(), result.obs_data(), obs_bytes);
-    std::memcpy(reward.data_ptr(), result.rewards_data(), batch * sizeof(int32_t));
+    std::memcpy(reward.data_ptr(), result.rewards_data(), batch * sizeof(float));
     std::memcpy(term.data_ptr(), result.terminations_data(), batch * sizeof(bool));
     std::memcpy(trunc.data_ptr(), result.truncations_data(), batch * sizeof(bool));
     std::memcpy(env_id.data_ptr(), result.env_ids_data(), batch * sizeof(int32_t));
@@ -300,7 +302,7 @@ std::vector<at::Tensor> recv_cuda(TorchHandle& d, bool with_final) {
     auto cuda_u8 = at::TensorOptions().dtype(at::kByte).device(at::kCUDA);
     auto obs_shape = obs_shape_for(d.vectorizer, batch);
     at::Tensor obs = at::empty(obs_shape, cuda_u8);
-    at::Tensor reward = at::empty({batch}, cuda_i32);
+    at::Tensor reward = at::empty({batch}, at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
     at::Tensor term = at::empty({batch}, at::TensorOptions().dtype(at::kBool).device(at::kCUDA));
     at::Tensor trunc = at::empty({batch}, at::TensorOptions().dtype(at::kBool).device(at::kCUDA));
     at::Tensor env_id = at::empty({batch}, cuda_i32);
@@ -314,7 +316,7 @@ std::vector<at::Tensor> recv_cuda(TorchHandle& d, bool with_final) {
                    what);
     };
     h2d(obs, result.obs_data(), obs_bytes, "recv: H2D obs");
-    h2d(reward, result.rewards_data(), batch * sizeof(int32_t), "recv: H2D reward");
+    h2d(reward, result.rewards_data(), batch * sizeof(float), "recv: H2D reward");
     h2d(term, result.terminations_data(), batch * sizeof(bool), "recv: H2D term");
     h2d(trunc, result.truncations_data(), batch * sizeof(bool), "recv: H2D trunc");
     h2d(env_id, result.env_ids_data(), batch * sizeof(int32_t), "recv: H2D env_id");
@@ -396,8 +398,8 @@ TORCH_LIBRARY_IMPL(ale_cpp, CompositeExplicitAutograd, m) {
 void init_vector_module_torch(nb::module_& m) {
     m.def("torch_register_handle",
           [](int64_t handle_id, EnvVectorizer& vectorizer, int64_t pinned_in_ptr,
-             int64_t batch_size, bool is_cuda, bool continuous, double threshold,
-             int64_t map_action_idx_ptr) {
+             int64_t batch_size, bool is_cuda,
+             bool continuous, double threshold, int64_t map_action_idx_ptr) {
               // `vectorizer` is the same instance env.ale wraps; nanobind hands
               // us a reference to it, so we just take its address.
               TorchHandle h;

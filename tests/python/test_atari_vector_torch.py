@@ -65,7 +65,7 @@ def test_recv_dtypes():
     obs, reward, term, trunc, env_id, lives, frame_num, ep_frame_num = _send_recv(env)
     env.close()
     assert obs.dtype == torch.uint8
-    assert reward.dtype == torch.int32
+    assert reward.dtype == torch.float32
     assert term.dtype == torch.bool
     assert trunc.dtype == torch.bool
     assert env_id.dtype == torch.int32
@@ -196,7 +196,7 @@ def test_cpp_recv_dtypes():
     )
     env.close()
     assert obs.shape == (_NUM_ENVS, 4, 84, 84) and obs.dtype == torch.uint8
-    assert reward.dtype == torch.int32
+    assert reward.dtype == torch.float32
     assert term.dtype == torch.bool and trunc.dtype == torch.bool
     for t in (env_id, lives, frame_num, ep_frame_num):
         assert t.dtype == torch.int32
@@ -345,3 +345,116 @@ def test_cpp_compile():
     result = compiled(torch.zeros(_NUM_ENVS, dtype=torch.int32))
     env.close()
     assert len(result) == 8
+
+
+def test_pending_action_space():
+    """allow_pending_action grows each env's action space by one.
+
+    The extra last id is the pending action; consumers derive it as
+    nvec[i] - 1. With the flag off the space is unchanged.
+    """
+    env_off = AtariVectorEnv(_GAME, num_envs=_NUM_ENVS)
+    env_on = AtariVectorEnv(_GAME, num_envs=_NUM_ENVS, allow_pending_action=True)
+    n = int(env_off.action_space.nvec[0])
+    n_on = int(env_on.action_space.nvec[0])
+    env_off.close()
+    env_on.close()
+    assert n_on == n + 1
+
+
+@cpp_required
+def test_cpp_pending_action_flag_no_side_effect():
+    """The flag alone does not perturb dynamics.
+
+    A flag-on env stepping only real actions is byte-identical to a flag-off
+    env (the plain two-argument step) with the same seed and actions.
+    """
+    env_off = AtariVectorEnv(_GAME, num_envs=_NUM_ENVS)
+    env_on = AtariVectorEnv(_GAME, num_envs=_NUM_ENVS, allow_pending_action=True)
+    env_off.reset(seed=0)
+    env_on.reset(seed=0)
+    env_off.torch(cpp=True)
+    env_on.torch(cpp=True)
+
+    rng = np.random.default_rng(0)
+    for _ in range(10):
+        acts = torch.from_numpy(rng.integers(0, 6, size=_NUM_ENVS, dtype=np.int32))
+        for a, b in zip(env_off.step(acts), env_on.step(acts)):
+            assert torch.equal(a, b)
+
+    env_off.close()
+    env_on.close()
+
+
+@cpp_required
+def test_cpp_pending_action_holds_env():
+    """The pending action freezes its env while others advance.
+
+    Both envs settle past the reset noops with real actions. Sending the
+    pending action to env 0 then holds it: byte-identical observation and
+    episode_frame_number, reward -inf (the sentinel for unobserved, written in
+    place of the clip), terminated/truncated False. Env 1 keeps acting and its
+    reward stays clipped to [-1, 1]. Ids past the pending action are invalid,
+    and a real action advances the held env again.
+    """
+    env = AtariVectorEnv(_GAME, num_envs=_NUM_ENVS, allow_pending_action=True)
+    env.reset(seed=0)
+    env.torch(cpp=True)
+    pending_id = int(env.action_space.nvec[0]) - 1
+    actions = torch.full((_NUM_ENVS,), 2, dtype=torch.int32)
+    for _ in range(20):
+        obs, *_ = env.step(actions)
+
+    hold_first = torch.tensor([pending_id, 2], dtype=torch.int32)
+    frozen = obs[0]
+    ep_frame_frozen = None
+    for _ in range(3):
+        obs, reward, term, trunc, _, _, _, ep_frame, *_ = env.step(hold_first)
+        assert torch.equal(obs[0], frozen)
+        assert torch.isneginf(reward[0])
+        assert not term[0] and not trunc[0]
+        if ep_frame_frozen is None:
+            ep_frame_frozen = ep_frame[0]
+        assert ep_frame[0] == ep_frame_frozen
+        assert torch.isfinite(reward[1]) and reward[1].abs() <= 1
+    assert not torch.equal(obs[1], frozen)
+
+    with pytest.raises(Exception):
+        env.step(torch.tensor([pending_id + 1, 2], dtype=torch.int32))
+
+    obs, *_ = env.step(actions)
+    changed = not torch.equal(obs[0], frozen)
+    env.close()
+    assert changed
+
+
+@cpp_required
+def test_cpp_pending_action_compile():
+    """The pending action flows through torch.compile and scan.
+
+    A fullgraph-compiled step with the pending action returns the -inf
+    sentinel for the held env, and a scan rollout holding env 0 throughout
+    traces without graph breaks and returns -inf at every held step.
+    """
+    from torch._higher_order_ops import scan
+
+    env = AtariVectorEnv(_GAME, num_envs=_NUM_ENVS, allow_pending_action=True)
+    env.reset(seed=0)
+    env.torch(cpp=True)
+    pending_id = int(env.action_space.nvec[0]) - 1
+    hold_first = torch.tensor([pending_id, 2], dtype=torch.int32)
+
+    compiled = torch.compile(env.step, fullgraph=True)
+    out = compiled(hold_first)
+    obs, reward = out[0], out[1]
+    assert len(out) == 9 and torch.isneginf(reward[0])
+
+    def step_fn(carry, actions):
+        obs, reward, *_ = env.step(actions)
+        return obs, reward
+
+    xs = hold_first.expand(4, _NUM_ENVS).contiguous()
+    _, rewards = scan(step_fn, obs, xs)
+    env.close()
+    assert rewards.shape == (4, _NUM_ENVS)
+    assert torch.isneginf(rewards[:, 0]).all()

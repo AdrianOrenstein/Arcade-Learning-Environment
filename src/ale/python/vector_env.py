@@ -44,6 +44,7 @@ class AtariVectorEnv(VectorEnv):
         life_loss_info: bool = False,
         reward_clipping: bool = True,
         use_fire_reset: bool = True,
+        allow_pending_action: bool = False,
     ):
         """Constructor for vector environment.
 
@@ -71,7 +72,15 @@ class AtariVectorEnv(VectorEnv):
             life_loss_info: If to provide a termination signal on life loss
             reward_clipping: If to clip rewards between -1 and 1
             use_fire_reset: If to take fire action on reset if available
+            allow_pending_action: Append one extra action id (the last index
+                of each env's action space), the pending action; an env
+                receiving it does not step and is held frozen, returning its
+                current observation and a reward of -inf (the sentinel for an
+                unobserved reward)
         """
+        assert not (
+            continuous and allow_pending_action
+        ), "allow_pending_action requires the discrete action space"
         if game is not None:
             games = [game]
         if isinstance(games, str):
@@ -108,6 +117,7 @@ class AtariVectorEnv(VectorEnv):
                 if isinstance(autoreset_mode, AutoresetMode)
                 else autoreset_mode
             ),
+            allow_pending_action=allow_pending_action,
         )
 
         self.num_envs = len(rom_paths)
@@ -126,6 +136,7 @@ class AtariVectorEnv(VectorEnv):
         self.full_action_space = full_action_space
         self.continuous = continuous
         self.continuous_action_threshold = continuous_action_threshold
+        self.allow_pending_action = allow_pending_action
         self.single_action_space, self.action_space = (
             self._setup_continuous_action()
             if self.continuous
@@ -157,11 +168,16 @@ class AtariVectorEnv(VectorEnv):
         return single, gymnasium.vector.utils.batch_space(single, self.batch_size)
 
     def _setup_discrete_action(self) -> tuple:
-        single = None if self.full_action_space is None else Discrete(16)
+        # With allow_pending_action each env's space has one extra last id,
+        # the pending action; consumers derive it as nvec[i] - 1.
+        extra = int(self.allow_pending_action)
+        single = None if self.full_action_space is None else Discrete(16 + extra)
         # Note: we expose the action space for all games instead of filtering up to the batch size,
         # the user will need the full list to determine the action size for each environment.
         action_space = MultiDiscrete(
-            np.array([len(s) for s in self.ale.get_action_sets()], dtype=np.int64)
+            np.array(
+                [len(s) + extra for s in self.ale.get_action_sets()], dtype=np.int64
+            )
         )
         return single, action_space
 
@@ -289,6 +305,11 @@ class AtariVectorEnv(VectorEnv):
         self.recv = recv
         self.reset = reset
         self._torch_unregister = unregister
+        # Same surface as torchcule's Env.device, so backend-agnostic consumers
+        # can allocate on the device the step tensors land on.
+        import torch
+
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
         return self
 
     def torchrl(self, device=None):

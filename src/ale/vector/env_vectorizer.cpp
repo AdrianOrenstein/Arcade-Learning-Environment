@@ -1,5 +1,7 @@
 #include "env_vectorizer.hpp"
 
+#include <limits>
+
 #if defined(__linux__)
     #include <pthread.h>
 #elif defined(_WIN32)
@@ -32,7 +34,8 @@ EnvVectorizer::EnvVectorizer(
     bool reward_clipping,
     int max_episode_steps,
     float repeat_action_probability,
-    bool full_action_space
+    bool full_action_space,
+    bool allow_pending_action
 ) : num_envs_(static_cast<int>(rom_paths.size())),
     batch_size_(batch_size > 0 ? batch_size : num_envs_),
     img_height_(img_height),
@@ -40,6 +43,7 @@ EnvVectorizer::EnvVectorizer(
     stack_num_(stack_num),
     grayscale_(grayscale),
     autoreset_mode_(autoreset_mode),
+    allow_pending_action_(allow_pending_action),
     last_recv_env_ids_(batch_size_ > 0 ? batch_size_ : num_envs_)
 {
     // Create environments
@@ -166,16 +170,23 @@ void EnvVectorizer::send(const std::vector<Action>& actions) {
         // thread, an out-of-range action throws after dequeue but before the
         // result is staged, so recv() would block forever waiting for a batch
         // slot that never fills. Failing here surfaces a clear error instead.
+        // With allow_pending_action the space has one extra id, n_actions, the
+        // pending action: it holds the env instead of acting.
         const int n_actions = static_cast<int>(envs_[actual_env_id]->action_set().size());
-        if (mapped.action_id < 0 || mapped.action_id >= n_actions) {
+        const int n_valid = n_actions + static_cast<int>(allow_pending_action_);
+        if (mapped.action_id < 0 || mapped.action_id >= n_valid) {
             throw std::out_of_range(
                 "Invalid action_id " + std::to_string(mapped.action_id) +
                 " for environment " + std::to_string(actual_env_id) +
-                "; expected 0 <= action_id < " + std::to_string(n_actions));
+                "; expected 0 <= action_id < " + std::to_string(n_valid));
         }
 
-        // Set action on environment
-        envs_[actual_env_id]->set_action(mapped.action_id, mapped.paddle_strength);
+        if (allow_pending_action_ && mapped.action_id == n_actions) {
+            mapped.hold = true;
+        } else {
+            // Set action on environment
+            envs_[actual_env_id]->set_action(mapped.action_id, mapped.paddle_strength);
+        }
 
         mapped_actions.push_back(mapped);
     }
@@ -226,6 +237,20 @@ void EnvVectorizer::execute_env(const Action& action) {
     int env_id = action.env_id;
     auto& env = *envs_[env_id];
 
+    if (action.hold && !action.force_reset) {
+        // The pending action: the env is frozen bit-exactly, with no act and
+        // no reset, and the reported reward/terminated/truncated must not
+        // re-trigger done handling. The reward is the -inf sentinel, written
+        // in place of (not through) the clip: it is unobserved, not absent.
+        staging_->stage_result(env_id, [&](OutputSlot& out) {
+            env.write_to(out);
+            *out.reward = -std::numeric_limits<float>::infinity();
+            *out.terminated = false;
+            *out.truncated = false;
+        });
+        return;
+    }
+
     if (autoreset_mode_ == AutoresetMode::NextStep) {
         // NextStep mode: reset happens before step if episode was over
         if (action.force_reset || env.is_episode_over()) {
@@ -257,7 +282,7 @@ void EnvVectorizer::execute_env(const Action& action) {
 
                     // Capture pre-reset metadata
                     env.write_to(slot);
-                    int pre_reward = *slot.reward;
+                    float pre_reward = *slot.reward;
                     bool pre_terminated = *slot.terminated;
                     bool pre_truncated = *slot.truncated;
 

@@ -27,13 +27,17 @@ struct Action {
     int action_id;
     float paddle_strength;
     bool force_reset;
+    // Set by the vectorizer when action_id is the pending action (the extra
+    // last id when allow_pending_action is on): the env is held frozen with a
+    // -inf sentinel reward instead of stepping.
+    bool hold = false;
 };
 
 /// Pointers for worker to write environment output directly into batch buffers
 struct OutputSlot {
     uint8_t* obs;
     int* env_id;
-    int* reward;
+    float* reward;
     bool* terminated;
     bool* truncated;
     int* lives;
@@ -51,7 +55,7 @@ public:
           obs_size_(obs_size),
           observations_(new uint8_t[batch_size * obs_size]),
           env_ids_(new int[batch_size]),
-          rewards_(new int[batch_size]),
+          rewards_(new float[batch_size]),
           terminations_(new bool[batch_size]),
           truncations_(new bool[batch_size]),
           lives_(new int[batch_size]),
@@ -139,7 +143,7 @@ public:
     uint8_t* obs_data() { return observations_; }
     uint8_t* final_obs_data() { return final_observations_; }
     int* env_ids_data() { return env_ids_; }
-    int* rewards_data() { return rewards_; }
+    float* rewards_data() { return rewards_; }
     bool* terminations_data() { return terminations_; }
     bool* truncations_data() { return truncations_; }
     int* lives_data() { return lives_; }
@@ -151,7 +155,7 @@ public:
     uint8_t* release_observations() { auto p = observations_; observations_ = nullptr; return p; }
     uint8_t* release_final_observations() { auto p = final_observations_; final_observations_ = nullptr; return p; }
     int* release_env_ids() { auto p = env_ids_; env_ids_ = nullptr; return p; }
-    int* release_rewards() { auto p = rewards_; rewards_ = nullptr; return p; }
+    float* release_rewards() { auto p = rewards_; rewards_ = nullptr; return p; }
     bool* release_terminations() { auto p = terminations_; terminations_ = nullptr; return p; }
     bool* release_truncations() { auto p = truncations_; truncations_ = nullptr; return p; }
     int* release_lives() { auto p = lives_; lives_ = nullptr; return p; }
@@ -167,7 +171,7 @@ private:
     std::size_t obs_size_;
     uint8_t* observations_;
     int* env_ids_;
-    int* rewards_;
+    float* rewards_;
     bool* terminations_;
     bool* truncations_;
     int* lives_;

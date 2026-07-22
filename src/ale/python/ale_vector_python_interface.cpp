@@ -163,7 +163,8 @@ void init_vector_module(nb::module_& m) {
                 int batch_size,
                 int num_threads,
                 int thread_affinity_offset,
-                const std::string& autoreset_mode_str
+                const std::string& autoreset_mode_str,
+                bool allow_pending_action
             ) {
                 new (t) EnvVectorizer(
                     expand_rom_paths(rom_paths, num_envs), batch_size, num_threads, thread_affinity_offset,
@@ -171,7 +172,7 @@ void init_vector_module(nb::module_& m) {
                     img_height, img_width, stack_num, grayscale,
                     frame_skip, maxpool, noop_max, use_fire_reset, episodic_life,
                     life_loss_info, reward_clipping, max_episode_steps,
-                    repeat_action_probability, full_action_space
+                    repeat_action_probability, full_action_space, allow_pending_action
                 );
             },
             nb::arg("rom_paths"),
@@ -193,7 +194,8 @@ void init_vector_module(nb::module_& m) {
             nb::arg("batch_size") = 0,
             nb::arg("num_threads") = 0,
             nb::arg("thread_affinity_offset") = -1,
-            nb::arg("autoreset_mode") = "NextStep")
+            nb::arg("autoreset_mode") = "NextStep",
+            nb::arg("allow_pending_action") = false)
 
         .def("reset", [](EnvVectorizer& self,
                          const std::vector<int>& reset_indices,

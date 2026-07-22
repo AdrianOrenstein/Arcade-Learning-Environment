@@ -70,7 +70,9 @@ def _python_recv_impl(handle_id: int, with_final: bool):
 
 
 def _python_recv_fake(handle_id: int, with_final: bool):
-    buf = _torch_buffers[handle_id]
+    # handle_id may arrive as a SymInt when dynamo saw several envs through
+    # the same closure; specialize so the buffer lookup can hash it.
+    buf = _torch_buffers[int(handle_id)]
     dev = buf["device"]
     keys = ["obs", "reward", "term", "trunc", *_INFO_KEYS]
     if with_final:
@@ -86,6 +88,9 @@ def register_pytorch_ops(env, device=None, tensordict: bool = False, cpp: bool =
     Returns ``(step, send, recv, reset, unregister)``. ``step``/``recv``/``reset``
     return a TensorDict when ``tensordict=True``, else flat tuples; ``step`` and
     ``recv`` yield 8 tensors (9 with a trailing ``final_obs`` in SameStep mode).
+    With the env's ``allow_pending_action`` flag the action space carries one
+    extra last id, the pending action: an env receiving it is held frozen and
+    its reward is the -inf sentinel.
     """
     _TensorDict = None
     if tensordict:
@@ -113,9 +118,8 @@ def register_pytorch_ops(env, device=None, tensordict: bool = False, cpp: bool =
     if tensordict:
 
         def step(actions: torch.Tensor):
-            return _TensorDict(
-                dict(zip(step_keys, step_op(handle_id, actions))), batch_size=[num_envs]
-            )
+            results = step_op(handle_id, actions)
+            return _TensorDict(dict(zip(step_keys, results)), batch_size=[num_envs])
 
         def recv():
             return _TensorDict(
@@ -167,9 +171,10 @@ def _setup_cpp(env, device, handle_id, num_envs, obs_shape, targets_cuda):
             "PyTorch (-DBUILD_VECTOR_TORCH_CUDA)."
         )
 
-    # Persistent pinned D2H buffer (CUDA send target); C++ holds the raw pointer.
-    # Discrete: int32[num_envs] action ids. Continuous: float32[num_envs*3] polar
-    # actions, mapped to ids + paddle strength in C++ via map_action_idx.
+    # Persistent pinned D2H buffer (CUDA send target); C++ holds the raw
+    # pointer. Actions are int32[num_envs] ids for discrete, float32[num_envs*3]
+    # polar for continuous (mapped to ids + paddle strength in C++ via
+    # map_action_idx).
     if env.continuous:
         pinned_in = torch.empty(
             num_envs * 3, dtype=torch.float32, pin_memory=targets_cuda
@@ -197,14 +202,16 @@ def _setup_cpp(env, device, handle_id, num_envs, obs_shape, targets_cuda):
         _torch_cpp_registered = True
 
         def _recv_fake(handle_id: int, *, final: bool):
-            buf = _torch_buffers[handle_id]
+            # handle_id may arrive as a SymInt when dynamo saw several envs
+            # through the same closure; specialize so the lookup can hash it.
+            buf = _torch_buffers[int(handle_id)]
             dev = buf["device"]
             n = buf["num_envs"]
             obs = torch.empty(buf["obs_shape"], dtype=torch.uint8, device=dev)
             scalars = [
                 torch.empty(n, dtype=d, device=dev)
                 for d in (
-                    torch.int32,
+                    torch.float32,
                     torch.bool,
                     torch.bool,
                     torch.int32,
@@ -291,7 +298,7 @@ def _setup_python(env, device, handle_id, num_envs, obs_shape, targets_cuda):
         "actions": torch.empty(num_envs, dtype=torch.int32, pin_memory=True),
         "paddle_strength": np.ones(num_envs, dtype=np.float32),
         "obs": torch.empty(obs_shape, dtype=torch.uint8, pin_memory=True),
-        "reward": torch.empty(num_envs, dtype=torch.int32, pin_memory=True),
+        "reward": torch.empty(num_envs, dtype=torch.float32, pin_memory=True),
         "term": torch.empty(num_envs, dtype=torch.bool, pin_memory=True),
         "trunc": torch.empty(num_envs, dtype=torch.bool, pin_memory=True),
         # The H2D-completion event is only meaningful when copying into a CUDA

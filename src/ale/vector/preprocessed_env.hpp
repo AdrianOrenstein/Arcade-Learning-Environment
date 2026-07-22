@@ -91,6 +91,7 @@ private:
     void get_screen_grayscale(uint8_t* buffer) const;
     void get_screen_rgb(uint8_t* buffer) const;
     void process_screen();
+    int step_once();
 
     int env_id_;
     fs::path rom_path_;

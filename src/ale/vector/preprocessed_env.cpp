@@ -1,5 +1,7 @@
 #include "preprocessed_env.hpp"
 
+#include <cmath>
+
 namespace ale::vector {
 
 /**
@@ -173,7 +175,8 @@ void PreprocessedEnv::reset() {
     } else {
         get_screen_rgb(raw_frames_[0].data());
     }
-    std::fill(raw_frames_[1].begin(), raw_frames_[1].end(), 0);
+    // The reset frame is its own pooling partner.
+    std::memcpy(raw_frames_[1].data(), raw_frames_[0].data(), raw_size_);
 
     // Process the screen
     process_screen();
@@ -187,7 +190,7 @@ void PreprocessedEnv::reset() {
     current_action_id_ = PLAYER_A_NOOP;
 }
 
-void PreprocessedEnv::step() {
+int PreprocessedEnv::step_once() {
     // Validate action
     if (current_action_id_ < 0 || current_action_id_ >= static_cast<int>(action_set_.size())) {
         throw std::out_of_range("Invalid action_id: " + std::to_string(current_action_id_) +
@@ -195,6 +198,13 @@ void PreprocessedEnv::step() {
     }
     const ale::Action action = action_set_[current_action_id_];
     const float strength = current_paddle_strength_;
+
+    // At frame_skip 1 the skip window below never captures a partner
+    // frame; roll the previous emulator frame in so pooling crosses
+    // the step boundary (frame_skip >= 2 captures it in the window).
+    if (frame_skip_ == 1 && maxpool_) {
+        std::memcpy(raw_frames_[1].data(), raw_frames_[0].data(), raw_size_);
+    }
 
     // Execute action for frame_skip frames
     reward_t reward = 0;
@@ -223,11 +233,16 @@ void PreprocessedEnv::step() {
     process_screen();
     lives_ = ale_->lives();
     reward_ = reward_clipping_ ? std::clamp<int>(reward, -1, 1) : reward;
+    return reward_;
+}
+
+void PreprocessedEnv::step() {
+    step_once();
 }
 
 void PreprocessedEnv::write_to(const OutputSlot& slot) const {
     *slot.env_id = env_id_;
-    *slot.reward = reward_;
+    *slot.reward = static_cast<float>(reward_);
     *slot.terminated = game_over_ || ((life_loss_info_ || episodic_life_) && was_life_lost_);
     *slot.truncated = elapsed_steps_ >= max_episode_steps_ && !(*slot.terminated);
     *slot.lives = lives_;
@@ -279,9 +294,17 @@ void PreprocessedEnv::get_screen_rgb(uint8_t* buffer) const {
 }
 
 void PreprocessedEnv::process_screen() {
-    // Maxpool raw frames if required
+    // Maxpool raw frames if required. maxpool_frames pools in place into its
+    // dst, so at frame_skip 1 the pool lands in raw_frames_[1]: raw_frames_[0]
+    // must stay raw because it is the next step's rolling pooling partner.
+    uint8_t* obs_source = raw_frames_[0].data();
     if (maxpool_) {
-        maxpool_frames(raw_frames_[0].data(), raw_frames_[1].data(), raw_size_);
+        if (frame_skip_ == 1) {
+            maxpool_frames(raw_frames_[1].data(), raw_frames_[0].data(), raw_size_);
+            obs_source = raw_frames_[1].data();
+        } else {
+            maxpool_frames(raw_frames_[0].data(), raw_frames_[1].data(), raw_size_);
+        }
     }
 
     // Get pointer to current position in circular buffer
@@ -290,12 +313,12 @@ void PreprocessedEnv::process_screen() {
     // Resize directly into the circular buffer or copy if no resize needed
     if (obs_frame_height_ != raw_frame_height_ || obs_frame_width_ != raw_frame_width_) {
         auto cv2_format = (obs_format_ == ObsFormat::Grayscale) ? CV_8UC1 : CV_8UC3;
-        cv::Mat src_img(raw_frame_height_, raw_frame_width_, cv2_format, raw_frames_[0].data());
+        cv::Mat src_img(raw_frame_height_, raw_frame_width_, cv2_format, obs_source);
         cv::Mat dst_img(obs_frame_height_, obs_frame_width_, cv2_format, dest_ptr);
         cv::resize(src_img, dst_img, dst_img.size(), 0, 0, cv::INTER_AREA);
     } else {
         // No resize needed, copy directly to circular buffer
-        std::memcpy(dest_ptr, raw_frames_[0].data(), raw_size_);
+        std::memcpy(dest_ptr, obs_source, raw_size_);
     }
 
     // Move to next position in circular buffer
